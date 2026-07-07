@@ -2,7 +2,6 @@ module Splice.AggregateLock where
 
 import Splice.Amulet
 import DA.Time
-import DA.Action
 import DA.Foldable (forA_)
 
 
