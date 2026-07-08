@@ -349,4 +349,6 @@ testAggregateLockVestingFlow = do
     + unlockedVestedAmulet.amount.initialAmount
     + vestedAmulet.aggregateLockedAmulet.amount.initialAmount
 
+  dsoAggregateAutomation app.dso 1
+
   pure ()
