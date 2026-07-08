@@ -5,7 +5,6 @@ import DA.Time
 import DA.Numeric
 
 import Splice.Amulet
-import Splice.AggregateLock (ControllerSets)
 import Splice.Fees
 import Splice.Types
 import Splice.Util

@@ -54,3 +54,5 @@ instance HasCheckedFetch TransferInstructionView ForDso where
 instance HasCheckedFetch AllocationView ForDso where
   contractGroupId AllocationView {..} = ForDso with
     dso = allocation.transferLeg.instrumentId.admin
+
+type ControllerSets = [[Party]]

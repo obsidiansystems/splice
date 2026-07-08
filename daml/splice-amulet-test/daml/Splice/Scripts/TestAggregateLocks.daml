@@ -100,7 +100,6 @@ testAggregateLocks = do
   pure ()
 
 
--- dsoAggregateAutomation :: 
 dsoAggregateAutomation : Party -> Int -> Script ()
 dsoAggregateAutomation dso round = do
   lockedHoldings <- query @AggregateLockedAmulet dso
@@ -133,6 +132,8 @@ dsoAggregateAutomation dso round = do
   
   pure ()
 
+
+-- Test general VestedAmulet unlcok and edge cases
 testVestingAmuletUnlock : Script ()
 testVestingAmuletUnlock = do
   DefaultAppWithUsers{..} <- setupDefaultAppWithUsers
@@ -149,7 +150,7 @@ testVestingAmuletUnlock = do
                                                               , unlockControllerSets = [[alice.primaryParty], [bob.primaryParty]]
                                                               }
 
-  vestedAmuletCid <- submit (actAs alice.primaryParty <> actAs app.dso) $
+  vestedAmuletCid <- submit (actAs [alice.primaryParty, app.dso]) $
     createCmd VestedAmulet with
       aggregateLockedAmulet = initialVestedAmuletValues.aggregateLockedAmulet
       startDate = initialVestedAmuletValues.startDate
@@ -166,7 +167,7 @@ testVestingAmuletUnlock = do
       expectedDso = app.dso
 
   -- Unlocking with the wrong authorizer should fail
-  submitMustFail (actAs alice.primaryParty <> actAs charlie.primaryParty) $
+  submitMustFail (actAs [alice.primaryParty, charlie.primaryParty]) $
     exerciseCmd vestedAmuletCid VestedAmulet_WithdrawAvailableUnlockedAmulet with
       authorizers = [charlie.primaryParty]
       openRound = openRound.round
@@ -202,7 +203,7 @@ testVestingAmuletUnlock = do
   -- Let's try to withdraw right before the full amount is available
   passTime ((days 364 + hours 5 + minutes 59  + seconds 59 + milliseconds 59 + microseconds 59) - totalTimePassed)
 
-  vestedWithdrawResult' <- submit (actAs alice.primaryParty <> actAs bob.primaryParty) $
+  vestedWithdrawResult' <- submit (actAs [alice.primaryParty, bob.primaryParty]) $
     exerciseCmd vestedAmuletCid' VestedAmulet_WithdrawAvailableUnlockedAmulet with
       authorizers = [bob.primaryParty]
       openRound = openRound.round
@@ -244,5 +245,108 @@ testVestingAmuletUnlock = do
      unlockedAmulet.amount.initialAmount
      + unlockedAmulet'.amount.initialAmount
      + unlockedAmulet''.amount.initialAmount
+
+  pure ()
+
+-- Testing being able to use VestedAmulet out of an AggregateLock unlock
+testAggregateLockVestingFlow : Script ()
+testAggregateLockVestingFlow = do
+  DefaultAppWithUsers{..} <- setupDefaultAppWithUsers
+  let period = (days 365) + (hours 6)
+      bobInitialAmount = 1000.0
+
+  amuletCid <- tap app alice 1000.0
+  amuletCid2 <- tap app bob bobInitialAmount
+  now <- getTime
+  (_, openRound) <- getLatestOpenRound app
+
+  aggLock <- submit (actAs [alice.primaryParty, app.dso]) $ createCmd AggregateLock with
+    dso = app.dso
+    key = AggregateLockKey alice.primaryParty
+    vestingSchedule = Some $ VestingSchedule with period
+
+  aggTotal <- submit app.dso $ createCmd AggregateTotal with
+    dso = app.dso
+    key = AggregateLockKey $ alice.primaryParty
+    totalAsOf = 0.0
+    asOfTime = now
+    asOfRound = 0
+    lowerBound = True
+    upperBound = True
+
+  let getTotal = do
+        [(totalContractId, totalContract)] <- query @AggregateTotal alice.primaryParty
+        (,) totalContractId . fromSome <$> queryDisclosure app.dso totalContractId
+
+  offer <- submit (actAs alice.primaryParty) $ createCmd OpenDelegationOffer with
+    owner = alice.primaryParty
+    lock = aggLock
+    unlockControllerSets = [[alice.primaryParty]]
+    substituteControllerSets = [[alice.primaryParty]]
+
+  disclosedOfferAlice <- fromSome <$> queryDisclosure alice.primaryParty offer
+  disclosedLock <- fromSome <$> queryDisclosure alice.primaryParty aggLock
+
+  submit alice.primaryParty $ exerciseCmd offer OpenDelegationOffer_LockHolding with
+    holder = alice.primaryParty
+    holding = amuletCid
+  (AggregateLock_LockHoldingResult lockedAmulet2) <- submit (actAs [bob.primaryParty] <> discloseMany [disclosedOfferAlice, disclosedLock]) $ exerciseCmd offer OpenDelegationOffer_LockHolding with
+    holder = bob.primaryParty
+    holding = amuletCid2
+
+  (total, disclosedTotal) <- getTotal
+  debug ("total", total)
+
+  unlockedAmulet <- submit (actAs [bob.primaryParty, alice.primaryParty] <> discloseMany [disclosedLock, disclosedTotal]) $ exerciseCmd lockedAmulet2 AggregateLockedAmulet_Unlock with
+    amount = 500.0
+    authorizers = [ bob.primaryParty, alice.primaryParty ]
+    lock = aggLock
+    total
+  debug ("Unlocked", unlockedAmulet)
+
+  -- Once the aggregateLock has unlocked, we can grab the vesting and locked portions
+  Some(initialVestedAmulet) <- queryContractId bob.primaryParty unlockedAmulet.vesting
+  Some(lockedAmulet) <- queryContractId @AggregateLockedAmulet bob.primaryParty unlockedAmulet.locked
+  debug ("vesting", initialVestedAmulet)
+  debug ("locked", lockedAmulet)
+
+  -- Immediate withdraw attempt causes transaction to fail due to the current
+  -- eligible withdraw amount being zero (no time has passed since locking yet)
+  submitMustFail (actAs [bob.primaryParty, alice.primaryParty]) $
+    exerciseCmd unlockedAmulet.vesting VestedAmulet_WithdrawAvailableUnlockedAmulet with
+      authorizers = [bob.primaryParty, alice.primaryParty]
+      openRound = openRound.round
+      expectedDso = app.dso
+
+  -- Time needs to pass to be able to withdraw fron the VestedAmulet
+  passTime (days 10)
+
+  vestedWithdrawResult <- submit (actAs [bob.primaryParty, alice.primaryParty]) $
+    exerciseCmd unlockedAmulet.vesting VestedAmulet_WithdrawAvailableUnlockedAmulet with
+      authorizers = [bob.primaryParty, alice.primaryParty]
+      openRound = openRound.round
+      expectedDso = app.dso
+  debug ("vestedWithdrawResult", vestedWithdrawResult)
+
+  let vestedAmuletCid' = fromSome $ mVestedAmuletCid vestedWithdrawResult
+  unlockedVestedAmulet <- fromSome <$> queryContractId bob.primaryParty (unlockedAmuletCid vestedWithdrawResult)
+  vestedAmulet <- fromSome <$> queryContractId bob.primaryParty vestedAmuletCid'
+  debug ("unlockedVestedAmulet", unlockedVestedAmulet)
+  debug ("vestedAmulet", vestedAmulet)
+
+  updatedNow <- getTime
+  let availableAmount = calculateAvailableWithdrawAmount updatedNow initialVestedAmulet
+
+  -- Make sure unlocked/locked vestedAmulet amounts are the expected values
+  assertEq unlockedVestedAmulet.amount.initialAmount availableAmount
+  assertEq vestedAmulet.aggregateLockedAmulet.amount.initialAmount $
+    initialVestedAmulet.aggregateLockedAmulet.amount.initialAmount - availableAmount
+
+  -- We want to make sure the initial amount is equivalent to
+  -- all locked/unlocked aggregate/vested amounts
+  assertEq bobInitialAmount $
+    lockedAmulet.amulet.amount.initialAmount
+    + unlockedVestedAmulet.amount.initialAmount
+    + vestedAmulet.aggregateLockedAmulet.amount.initialAmount
 
   pure ()

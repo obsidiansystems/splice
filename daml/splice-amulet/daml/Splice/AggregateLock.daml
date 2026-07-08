@@ -1,9 +1,11 @@
 module Splice.AggregateLock where
 
-import Splice.Amulet
 import DA.Time
 import DA.Foldable (forA_)
 
+import Splice.Amulet
+import Splice.Types
+import Splice.VestedAmulet
 
 data AggregateLockKey = AggregateLockKey with
   owner : Party
@@ -12,8 +14,6 @@ data AggregateLockKey = AggregateLockKey with
 data VestingSchedule = VestingSchedule with
   period : RelTime -- check this type.
     deriving (Eq, Show)
-
-type ControllerSets = [[Party]]
 
 template AggregateLock
   with
@@ -89,6 +89,7 @@ template AggregateLockedAmulet
         case lockParameters.vestingSchedule of
           Some schedule -> do
             vested <- create VestedAmulet with
+              unlockControllerSets = unlockControllerSets
               startDate = now
               endDate = addRelTime now schedule.period
               aggregateLockedAmulet = amulet with
