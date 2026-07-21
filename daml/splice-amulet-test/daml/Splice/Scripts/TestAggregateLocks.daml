@@ -16,6 +16,7 @@ import Splice.Testing.Registries.AmuletRegistryV2
 import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.AllocationV2
 import Splice.Api.Token.AllocationInstructionV2
+import Splice.Api.Token.HoldingV2
 import Splice.AmuletAllocationV2
 import Splice.Testing.Utils
 
@@ -25,6 +26,7 @@ import DA.Assert
 import DA.Optional
 import DA.Functor
 import DA.Foldable (mapA_, sequence_)
+import DA.List (head)
 import qualified DA.TextMap as TM
 
 import Splice.Scripts.TokenStandard.TestAmuletTokenStandardTestEnv
@@ -54,11 +56,13 @@ lockForAggregate : TestEnv -> Decimal -> Party -> ContractId AggregateLock -> Sc
 lockForAggregate te amount = lockForGovernance te (TM.fromList [(te.instrId.id, amount)]) $ Metadata $ TM.fromList
   [ ("cip-105/type", "aggregateLock") ]
 
-lockForVesting : Time -> TestEnv -> Party -> ContractId AggregateLock -> Script AllocationInstructionResult
-lockForVesting now te = lockForGovernance te TM.empty $ Metadata $ TM.fromList
+lockForVesting : Decimal -> Time -> TestEnv -> Party -> ContractId AggregateLock -> Script AllocationInstructionResult
+lockForVesting initialAmount now te = lockForGovernance te TM.empty $ Metadata $ TM.fromList
   [ ("cip-105/type", "vestingLock")
   , ("cip-105/vestingLock.startDate", encodeTime now)
-  , ("cip-105/vestingLock.endDate", encodeTime $ addRelTime now $ days 365 + hours 6) ]
+  , ("cip-105/vestingLock.endDate", encodeTime $ addRelTime now $ days 365 + hours 6)
+  , ("cip-105/vestingLock.initialAmount", show initialAmount)
+  ]
 
 testAggregateLockHappyPath : Script ()
 testAggregateLockHappyPath = do
@@ -79,7 +83,8 @@ testAggregateLockHappyPath = do
   -- Check total for the aggregate; needs to be implemented.
  
   now <- getTime
-  AllocationInstructionResult { output = AllocationInstructionResult_Completed vestingInput } <- lockForVesting (addRelTime now $ minutes 5) env bob aggLock
+  let initialAmountToUnlock = 365.25
+  AllocationInstructionResult { output = AllocationInstructionResult_Completed vestingInput } <- lockForVesting initialAmountToUnlock (addRelTime now $ minutes 5) env bob aggLock
 
   -- use getSettlementFactory to get the extraArgs and disclosures to call AggregateLock_Unlock
   enriched <- getSettlementFactory registriesEnv.amuletV2 $ SettlementFactory_SettleBatch with
@@ -98,7 +103,7 @@ testAggregateLockHappyPath = do
     lockedCid = locked
     withdrawToCid = vestingInput
     authorizers = [ bob ]
-    amount = 100.0
+    amount = initialAmountToUnlock
     extraArgs = enriched.arg.extraArgs
 
   allocations <- query @AmuletAllocationV2 bob
@@ -109,3 +114,53 @@ testAggregateLockHappyPath = do
 
   -- Need to check other than via inspection that the two allocations actually exist with correct values.
 
+  -- TODO: Temporary, bad to do this
+  let vestingLockAllocationCid = head [cid | (cid, a) <- allocations, TM.member "cip-105/vestingLock.initialAmount" a.allocation.meta.values]
+
+  -- Immediate withdraw attempt causes transaction to fail due to the current
+  -- eligible withdraw amount being zero (no time has passed since locking yet)
+  submitMustFail (actAs bob <> disclose aggLockDisclosure <> discloseMany' enriched.disclosures ) $ exerciseCmd aggLock $ VestingLock_Withdraw with
+    factoryCid = enriched.factoryCid
+    authorizers = [ bob ]
+    vestingLockCid = toInterfaceContractId vestingLockAllocationCid
+    extraArgs = enriched.arg.extraArgs
+
+  -- Time needs to pass to be able to withdraw fron the VestedAmulet
+  passTime (days 10)
+
+  (AllocationResult vestingAllocResult tmHoldingCids _) <- submit (actAs bob <> disclose aggLockDisclosure <> discloseMany' enriched.disclosures ) $ exerciseCmd aggLock $ VestingLock_Withdraw with
+    factoryCid = enriched.factoryCid
+    authorizers = [ bob ]
+    vestingLockCid = toInterfaceContractId vestingLockAllocationCid
+    extraArgs = enriched.arg.extraArgs
+  debug vestingAllocResult
+
+  let holdingCids = fromSome $ TM.lookup env.instrId.id tmHoldingCids
+  holdings <- queryInterface @Holding bob
+  -- The holdings would include both locked/unlocked, so we filter
+  let [(_, (Some unlockedHolding))] = filter (\(hcid, (Some h)) -> isNone h.lock && hcid `elem` holdingCids) holdings
+  debug unlockedHolding
+
+  let tolerance = 0.01
+  assert $ (abs $ unlockedHolding.amount - 10.0) < tolerance
+
+  -- Let's try to withdraw the rest (now we should be past endDate)
+  passTime (days 365)
+
+  (AllocationResult vestingAllocResult' tmHoldingCids' _) <- submit (actAs bob <> disclose aggLockDisclosure <> discloseMany' enriched.disclosures ) $ exerciseCmd aggLock $ VestingLock_Withdraw with
+    factoryCid = enriched.factoryCid
+    authorizers = [ bob ]
+    vestingLockCid = fromSome $ vestingAllocResult.nextIterationAllocationCid
+    extraArgs = enriched.arg.extraArgs
+
+  debug vestingAllocResult'
+  -- We should have no more remaining amount vesting, once the full period has passed
+  assertEq None $ vestingAllocResult'.nextIterationAllocationCid
+
+  let holdingCids' = fromSome $ TM.lookup env.instrId.id tmHoldingCids'
+  holdings' <- queryInterface @Holding bob
+  -- The holdings would include both locked/unlocked, so we filter
+  let [(_, (Some unlockedHolding'))] = filter (\(hcid, (Some h)) -> isNone h.lock && hcid `elem` holdingCids') holdings'
+  debug unlockedHolding'
+
+  assertEq initialAmountToUnlock $ unlockedHolding.amount + unlockedHolding'.amount
