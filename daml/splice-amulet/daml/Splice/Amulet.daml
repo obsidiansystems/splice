@@ -498,6 +498,7 @@ template SvRewardCoupon with
     beneficiary : Party -- ^ The beneficiary allowed to receive the reward.
     round : Round
     weight : Int -- ^ Coupons receive a share of the SV issuance proportional to their weight.
+    svRightOwnerName: Optional Text -- ^ SV right owner whose lifetime rewards increased.
   where
     ensure weight > 0
 
@@ -605,6 +606,7 @@ template UnclaimedActivityRecord
     amount : Decimal -- ^ The amount of `Amulet` to be minted.
     reason : Text -- ^ A reason to mint the `Amulet`.
     expiresAt : Time -- ^ Selected timestamp defining the lifetime of the contract.
+    svRightOwnerName: Optional Text -- ^ SV right owner whose lifetime rewards increased.
   where
     signatory dso
     observer beneficiary
@@ -621,7 +623,7 @@ template UnclaimedActivityRecord
 template SvRewardMintReceipt with
     dso : Party
     amount : Decimal
-    beneficiary : Party
+    svRightOwnerName: Text -- ^ SV right owner whose lifetime rewards increased.
   where
     signatory dso
 
