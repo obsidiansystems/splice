@@ -164,6 +164,7 @@ initDecentralizedSynchronizerWithAmuletPrice isDevNet initialRound amuletPrice o
           rightOwnerParty = svParty
           voteWeight = 1
           rewardWeight = rewardWeight
+          rewardFactorState = None
           rewardNodeOperatorName = svName
           beneficiaries = []
       void $ submit (actAs sv1 <> readAs dso) $ exerciseCmd result.newDsoRules DsoRules_ExecuteAddSvRightOwnerInstruction with
