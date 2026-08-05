@@ -628,6 +628,7 @@ template SvRewardMintReceipt with
   where
     signatory dso
 
+    ensure amount > 0.0
 
 -- Support code
 ---------------
@@ -764,3 +765,6 @@ instance HasCheckedFetch DevelopmentFundCoupon ForOwner where
 
 instance HasCheckedFetch DevelopmentFundCoupon ForDso where
   contractGroupId DevelopmentFundCoupon{..} = ForDso with dso
+
+instance HasCheckedFetch SvRewardMintReceipt ForDso where
+  contractGroupId SvRewardMintReceipt{..} = ForDso with dso
