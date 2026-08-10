@@ -1139,13 +1139,13 @@ executeTransfer' config csum dso t = do
   osum <- preprocessOutputs csum.config t.outputs
   summary <- summarizeTransfer t.sender csum.openRoundNumber csum.amuletPrice csum.config isum osum
 
-  case isum.mintedRewardMap of
+  case isum.mintedSvRewardMap of
     None -> pure ()
-    Some m -> forA_ (Map.toList m) $ \(beneficiary, amount) ->
+    Some m -> forA_ (Map.toList m) $ \(svRightOwnerName, amount) ->
       create SvRewardMintReceipt with
         dso
         amount
-        beneficiary
+        svRightOwnerName
 
   -- check that overall transfer constraints are satisfied
   case checkTransferConstraints t summary csum.config of
@@ -1254,8 +1254,8 @@ data TransferInputsSummary = TransferInputsSummary with
     totalDevelopmentFundAmount : Optional Decimal
       -- ^ Note: Same rationale as above — made optional to ensure compatibility with
       -- the upgrade checker on package upload because `TransferInputsSummary` is serializable.
-    mintedRewardMap : Optional (Map Party Decimal)
-      -- ^ Note: This is a map from the beneficiaries of unclaimed activity records, and reward coupons to
+    mintedSvRewardMap : Optional (Map Text Decimal)
+      -- ^ Note: This is a map from the SV rights owner name of the unclaimed activity records, and reward coupons to
       -- the amounts minted for them, used to produce receipts.
   deriving (Eq, Show)
 
@@ -1363,11 +1363,11 @@ summarizeAndConsumeInputs csum dso sender inps = do
       changeToHoldingFeesRate = 0.0
       totalUnclaimedActivityRecordAmount = Some 0.0
       totalDevelopmentFundAmount = Some 0.0
-      mintedRewardMap = Some Map.empty
+      mintedSvRewardMap = Some Map.empty
 
-    addMintedReward : Party -> Decimal -> Optional (Map Party Decimal) -> Optional (Map Party Decimal)
-    addMintedReward beneficiary amount None = Some $ Map.singleton beneficiary amount
-    addMintedReward beneficiary amount (Some m) = Some $ Map.insertWith (+) beneficiary amount m
+    addMintedSvReward : Text -> Decimal -> Optional (Map Text Decimal) -> Optional (Map Text Decimal)
+    addMintedSvReward svRightOwnerName amount None = Some $ Map.singleton svRightOwnerName amount
+    addMintedSvReward svRightOwnerName amount (Some m) = Some $ Map.insertWith (+) svRightOwnerName amount m
 
     summarizeAndConsumeInput _round s (InputAmulet amuletCid) = do
       amulet <- fetchAndArchive forOwner amuletCid
@@ -1385,7 +1385,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero + getValueAsOfRound0 amulet.amount
         changeToHoldingFeesRate = s.changeToHoldingFeesRate - amulet.amount.ratePerRound.rate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputAppRewardCoupon couponCid) = do
       coupon <- fetchAndArchive forOwner couponCid
@@ -1405,7 +1405,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputValidatorRewardCoupon couponCid) = do
       -- we must and do use the validator right to archive the coupon of the user
@@ -1428,7 +1428,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputSvRewardCoupon couponCid) = do
       -- we use the SvRewardCoupon_ArchiveAsBeneficiary choice to signal the archival of the coupon
@@ -1450,7 +1450,9 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = addMintedReward coupon.beneficiary currentSvRewardCouponAmount s.mintedRewardMap
+        mintedSvRewardMap = case coupon.svRightOwnerName of
+                None -> s.mintedSvRewardMap
+                Some svRightOwnerName -> addMintedSvReward svRightOwnerName currentSvRewardCouponAmount s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputValidatorLivenessActivityRecord recordCid) = do
       record <- fetchAndArchive forOwner recordCid
@@ -1468,7 +1470,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (ExtTransferInput _dummyUnitField optInputValidatorFaucetCoupon) = do
       optional (pure s) (summarizeAndConsumeValidatorFaucetInput s) optInputValidatorFaucetCoupon
@@ -1476,19 +1478,33 @@ summarizeAndConsumeInputs csum dso sender inps = do
     summarizeAndConsumeInput _round s (InputUnclaimedActivityRecord unclaimedActivityRecordCid) = do
       unclaimedActivityRecord <- fetchAndArchive forOwner unclaimedActivityRecordCid
       assertWithinDeadline "UnclaimedActivityRecord.expiresAt" unclaimedActivityRecord.expiresAt
-      return TransferInputsSummary with
-        totalAmuletAmount = s.totalAmuletAmount
-        totalAppRewardAmount = s.totalAppRewardAmount
-        totalValidatorRewardAmount = s.totalValidatorRewardAmount
-        totalUnclaimedActivityRecordAmount =
-          (+ unclaimedActivityRecord.amount) <$> s.totalUnclaimedActivityRecordAmount
-        totalValidatorFaucetAmount = s.totalValidatorFaucetAmount
-        totalSvRewardAmount = s.totalSvRewardAmount
-        totalHoldingFees = s.totalHoldingFees
-        amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
-        changeToHoldingFeesRate = s.changeToHoldingFeesRate
-        totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = addMintedReward unclaimedActivityRecord.beneficiary unclaimedActivityRecord.amount s.mintedRewardMap
+
+      return $ case unclaimedActivityRecord.svRightOwnerName of
+        None -> TransferInputsSummary with
+          totalAmuletAmount = s.totalAmuletAmount
+          totalAppRewardAmount = s.totalAppRewardAmount
+          totalValidatorRewardAmount = s.totalValidatorRewardAmount
+          totalUnclaimedActivityRecordAmount =
+            (+ unclaimedActivityRecord.amount) <$> s.totalUnclaimedActivityRecordAmount
+          totalValidatorFaucetAmount = s.totalValidatorFaucetAmount
+          totalSvRewardAmount = s.totalSvRewardAmount
+          totalHoldingFees = s.totalHoldingFees
+          amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
+          changeToHoldingFeesRate = s.changeToHoldingFeesRate
+          totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
+          mintedSvRewardMap = s.mintedSvRewardMap
+        Some svRightOwnerName -> TransferInputsSummary with
+          totalAmuletAmount = s.totalAmuletAmount
+          totalAppRewardAmount = s.totalAppRewardAmount
+          totalValidatorRewardAmount = s.totalValidatorRewardAmount
+          totalUnclaimedActivityRecordAmount = s.totalUnclaimedActivityRecordAmount
+          totalValidatorFaucetAmount = s.totalValidatorFaucetAmount
+          totalSvRewardAmount = unclaimedActivityRecord.amount + s.totalSvRewardAmount
+          totalHoldingFees = s.totalHoldingFees
+          amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
+          changeToHoldingFeesRate = s.changeToHoldingFeesRate
+          totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
+          mintedSvRewardMap = addMintedSvReward svRightOwnerName unclaimedActivityRecord.amount s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputDevelopmentFundCoupon couponCid) = do
       coupon <- fetchAndArchive forOwner couponCid
@@ -1504,7 +1520,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = (+ coupon.amount) <$> s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeInput _round s (InputRewardCouponV2 couponCid) = do
       coupon <- fetchAndArchive forOwner couponCid
@@ -1522,7 +1538,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
     summarizeAndConsumeValidatorFaucetInput s couponCid = do
       coupon <- fetchAndArchive forOwner couponCid
@@ -1540,7 +1556,7 @@ summarizeAndConsumeInputs csum dso sender inps = do
         amountArchivedAsOfRoundZero = s.amountArchivedAsOfRoundZero
         changeToHoldingFeesRate = s.changeToHoldingFeesRate
         totalDevelopmentFundAmount = s.totalDevelopmentFundAmount
-        mintedRewardMap = s.mintedRewardMap
+        mintedSvRewardMap = s.mintedSvRewardMap
 
 -- | Deduplicate lock-holders to store them and charge for them at most once
 dedupOutputLockHolders : TransferOutput -> TransferOutput

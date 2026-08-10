@@ -546,6 +546,9 @@ data TrafficState = TrafficState with
 getSvRightOwners : DsoRules -> [Text]
 getSvRightOwners DsoRules{..} = fromOptional [] svRightOwners
 
+getLifetimeRewardTotal : SvRewardState -> Decimal
+getLifetimeRewardTotal state = fromOptional 0.0 state.lifetimeRewardTotal
+
 onLedgerSvRightOwners : DsoRules -> Bool
 onLedgerSvRightOwners DsoRules{..} = isSome svRightOwners
 
@@ -1426,6 +1429,8 @@ template DsoRules with
         beneficiaries : [(Party, Int)]
       controller sv
       do
+        -- TODO: Given that we are not tracking lifetime rewards in this choice, we should ensure
+        -- that this choice cannot be called after the activation of on-ledger SV-locking.
         requireNoOnLedgerSvRightOwners this
         let svOperator = sv
         case Map.lookup svOperator svs of
@@ -1463,6 +1468,7 @@ template DsoRules with
                 beneficiary
                 weight
                 round = openRound.round
+                svRightOwnerName = None
 
             return DsoRules_ReceiveSvRewardCouponResult with
                 svRewardState = newRewardStateCid
@@ -1521,6 +1527,7 @@ template DsoRules with
               beneficiary
               weight
               round = openRound.round
+              svRightOwnerName = Some svName
 
           return (svName, (newRewardStateCid, couponCids))
 
@@ -1808,6 +1815,7 @@ template DsoRules with
         amount : Decimal
         reason : Text
         expiresAt : Time
+        svRightOwnerName : Optional Text
       controller dso
       do
         now <- getTime
@@ -1820,6 +1828,7 @@ template DsoRules with
             amount
             reason
             expiresAt
+            svRightOwnerName
         pure $ DsoRules_CreateUnallocatedUnclaimedActivityRecordResult with ..
 
     nonconsuming choice DsoRules_AllocateUnallocatedUnclaimedActivityRecord : DsoRules_AllocateUnallocatedUnclaimedActivityRecordResult
@@ -1852,6 +1861,7 @@ template DsoRules with
           amount
           reason
           expiresAt
+          svRightOwnerName
 
         pure $ DsoRules_AllocateUnallocatedUnclaimedActivityRecordResult with ..
 
@@ -2053,6 +2063,31 @@ template DsoRules with
         instruction <- fetchAndArchive (ForDso dso) instructionCid
         assertDeadlineExceeded "AddSvRightOwnerInstruction.expiresAt" instruction.expiresAt
         pure ()
+
+    nonconsuming choice DsoRules_MergeSvRewardMintReceipts : ContractId SvRewardState
+      with
+        receiptCids : [ContractId SvRewardMintReceipt]
+        svOperator : Party
+        svRewardStateCid : ContractId SvRewardState
+      controller svOperator
+      do
+        name <- getAndValidateSvNodeOperatorParty this (Some svOperator)
+        require "There must be at least one receipt" $
+          length receiptCids >= 1
+        svRewardState <- fetchAndArchive (ForSv with dso; svName = name) svRewardStateCid
+
+        receiptAmounts <- forA receiptCids $ \cid -> do
+          r <- fetchAndArchive (ForDso with dso) cid
+          TSU.requireMatchExpected ("svRewardState.svName", svRewardState.svName) r.svRightOwnerName
+          return r.amount
+
+        let receiptTotal = sum receiptAmounts
+
+        create SvRewardState with
+          dso
+          svName = svRewardState.svName
+          state = svRewardState.state
+          lifetimeRewardTotal = Some $ receiptTotal + getLifetimeRewardTotal svRewardState
 
 
 template AddSvRightOwnerInstruction
@@ -2278,6 +2313,7 @@ createSvRightOwnerContracts rules@DsoRules{..} newSvName rightOwnerInfo joinedAs
       numRoundsMissed = 0
       numRoundsCollected = 0
       numCouponsIssued = 0
+    lifetimeRewardTotal = Some 0.0
   case rightOwnerInfo of
     None -> requireNoOnLedgerSvRightOwners rules
     Some info -> do
@@ -2370,6 +2406,7 @@ template UnallocatedUnclaimedActivityRecord
     amount : Decimal -- ^ The amount of `Amulet` to be minted
     reason : Text -- ^ A reason to mint the `Amulet`
     expiresAt : Time -- ^ Selected timestamp defining the lifetime of the UnclaimedActivityRecord contract.
+    svRightOwnerName: Optional Text -- ^ SV right owner whose lifetime rewards increased.
   where
     signatory dso
     ensure amount > 0.0

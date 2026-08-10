@@ -18,6 +18,11 @@ data SvRightOwnerInfo = SvRightOwnerInfo
       -- For rewards to be minted both the node operator.
     beneficiaries : [(Party, Decimal)]
       -- ^ List of beneficiaries and their percentages for reward distribution. Must not include rightOwnerParty. Remainder goes to rightOwnerParty.
+    -- TODO: Double check whether this template already exists in main or not (or deployed). Make optional decimal if so (for upgrade reasons).
+    svLifetimeRewardsAdjustment : Decimal
+      -- ^ Adjustment to this SV's lifetime rewards. Used for example to
+      -- reflect the lifetime rewards accumulated before Phase 1 of
+      -- SV locking. Can be changed by the SVs via voting.
   deriving (Eq, Show)
 
 instance Patchable SvRightOwnerInfo where
@@ -28,6 +33,7 @@ instance Patchable SvRightOwnerInfo where
       rewardWeight = patch new.rewardWeight base.rewardWeight current.rewardWeight
       rewardNodeOperatorName = patch new.rewardNodeOperatorName base.rewardNodeOperatorName current.rewardNodeOperatorName
       beneficiaries = patchScalar new.beneficiaries base.beneficiaries current.beneficiaries
+      svLifetimeRewardsAdjustment = patch new.svLifetimeRewardsAdjustment base.svLifetimeRewardsAdjustment current.svLifetimeRewardsAdjustment
 
 template SvRightOwner
   with

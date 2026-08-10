@@ -45,6 +45,8 @@ template SvRewardState with
     dso : Party
     svName : Text -- ^ sv right owner name
     state : RewardState
+    lifetimeRewardTotal : Optional Decimal
+      -- ^ Total amount of SV rewards minted for this SV rights owner.
   where
     signatory dso
 
