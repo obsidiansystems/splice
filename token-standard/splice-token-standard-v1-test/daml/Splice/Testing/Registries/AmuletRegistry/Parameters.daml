@@ -5,6 +5,7 @@
 module Splice.Testing.Registries.AmuletRegistry.Parameters where
 
 import qualified DA.Set as Set
+import DA.TextMap qualified as TextMap
 import DA.Time
 
 
@@ -98,6 +99,8 @@ defaultAmuletConfig = AmuletConfig with
   rewardConfig = None
 
   transferPreapprovalBaseDuration = None
+
+  policySwitchoverTimes = Some TextMap.empty
 
 -- | Default configuration schedule with single current amulet config
 defaultAmuletConfigSchedule : Schedule Time (AmuletConfig USD)
