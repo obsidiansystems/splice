@@ -4,6 +4,7 @@
 module Splice.AmuletConfig where
 
 import DA.Optional
+import DA.TextMap qualified as TextMap
 import DA.Time
 
 import Splice.Fees
@@ -112,7 +113,11 @@ data AmuletConfig unit = AmuletConfig with
     rewardConfig : Optional RewardConfig
       -- ^ Configuration for the reward accounting and calculation. If None, then on-ledger reward tracking is used.
     transferPreapprovalBaseDuration : Optional RelTime -- ^ Base duration of a transfer pre-approval granted for free on creation and renewal. Default: 90 days.
+    policySwitchoverTimes : Optional (TextMap.TextMap Time)
   deriving (Eq, Show)
+
+policySwitchoverSvLockActivationTime : Text
+policySwitchoverSvLockActivationTime = "cip-105/activate-on-chain-locking-at"
 
 getExternalPartyConfigStateTickDuration : AmuletConfig a -> RelTime
 getExternalPartyConfigStateTickDuration config = fromOptional (hours 24) config.externalPartyConfigStateTickDuration
@@ -209,6 +214,7 @@ instance Patchable (AmuletConfig USD) where
     externalPartyConfigStateTickDuration = patch new.externalPartyConfigStateTickDuration base.externalPartyConfigStateTickDuration current.externalPartyConfigStateTickDuration
     rewardConfig = patch new.rewardConfig base.rewardConfig current.rewardConfig
     transferPreapprovalBaseDuration = patch new.transferPreapprovalBaseDuration base.transferPreapprovalBaseDuration current.transferPreapprovalBaseDuration
+    policySwitchoverTimes = patch new.policySwitchoverTimes base.policySwitchoverTimes current.policySwitchoverTimes
 
 instance Patchable RewardConfig where
   patch new base current = RewardConfig with
