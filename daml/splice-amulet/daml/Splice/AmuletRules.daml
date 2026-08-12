@@ -1123,28 +1123,28 @@ data RewardsIssuanceConfig = RewardsIssuanceConfig with
 executeTransfer : Optional (TextMap.TextMap Time) -> ContractId TransferEventsV2.EventLog -> RewardsIssuanceConfig -> TransferContext -> Party -> Transfer -> Update TransferResult
 executeTransfer policySwitchoverTimes eventLogCid config context dso t = do
   -- compute summaries
-  csum <- summarizeAndValidateContext eventLogCid context dso t
-  executeTransfer' policySwitchoverTimes config csum dso t
+  csum <- summarizeAndValidateContext eventLogCid policySwitchoverTimes context dso t
+  executeTransfer' config csum dso t
 
 -- | Execute a transfer for external parties so that the prepared tx remains valid for 24h
 executeExternalPartyTransfer : Party -> ExternalPartyTransferContext -> Transfer -> Update TransferResult
 executeExternalPartyTransfer dso context t = do
-  (csum, policySwitchoverTimes) <- summarizeAndValidateExternalPartyContext context dso t
+  csum <- summarizeAndValidateExternalPartyContext context dso t
   let rewardsConfig = RewardsIssuanceConfig with
         issueAppRewards = True
         issueValidatorRewards = False -- doesn't matter with fees = 0
-  executeTransfer' policySwitchoverTimes rewardsConfig csum dso t
+  executeTransfer' rewardsConfig csum dso t
 
 
-executeTransfer' : Optional (TextMap.TextMap Time) -> RewardsIssuanceConfig -> TransferContextSummaryV2 -> Party -> Transfer -> Update TransferResult
-executeTransfer' policySwitchoverTimes config csum dso t = do
+executeTransfer' : RewardsIssuanceConfig -> TransferContextSummaryV2 -> Party -> Transfer -> Update TransferResult
+executeTransfer' config csum dso t = do
   isum <- summarizeAndConsumeInputs csum dso t.sender t.inputs
   osum <- preprocessOutputs csum.config t.outputs
   summary <- summarizeTransfer t.sender csum.openRoundNumber csum.amuletPrice csum.config isum osum
 
   currentRound <- getIssuingMiningRound csum csum.openRoundNumber
 
-  let cip105LockingActivated = case TextMap.lookup policySwitchoverSvLockActivationTime =<< policySwitchoverTimes of
+  let cip105LockingActivated = case TextMap.lookup policySwitchoverSvLockActivationTime =<< csum.policySwitchoverTimes of
         None -> False
         Some t -> currentRound.opensAt <= t
 
@@ -1245,6 +1245,7 @@ data TransferContextSummaryV2 = TransferContextSummaryV2 with
     validatorRights : Map Party (ContractId ValidatorRight)
     rewardCalculationVersion : Optional RewardVersion
     eventLogCid : Optional (ContractId TransferEventsV2.EventLog)
+    policySwitchoverTimes : Optional (TextMap.TextMap Time)
   deriving (Eq, Show)
 
 data TransferInputsSummary = TransferInputsSummary with
@@ -1278,8 +1279,8 @@ data PreprocessedTransferOutput = PreprocessedTransferOutput with
     meta : Optional Metadata -- ^ Metadata to attach to the output amulet
   deriving (Eq, Show)
 
-summarizeAndValidateContext : ContractId TransferEventsV2.EventLog -> TransferContext -> Party -> Transfer -> Update TransferContextSummaryV2
-summarizeAndValidateContext eventLogCid context dso tf = do
+summarizeAndValidateContext : ContractId TransferEventsV2.EventLog -> Optional (TextMap.TextMap Time) -> TransferContext -> Party -> Transfer -> Update TransferContextSummaryV2
+summarizeAndValidateContext eventLogCid policySwitchoverTimes context dso tf = do
   -- check that the current mining round is open
   openRound <- fetchReferenceData (ForDso with dso) context.openMiningRound
   assertDeadlineExceeded "openRound.opensAt" openRound.opensAt
@@ -1314,8 +1315,9 @@ summarizeAndValidateContext eventLogCid context dso tf = do
     amuletPrice = openRound.amuletPrice
     rewardCalculationVersion = (.mintingVersion) <$> openRound.rewardConfig
     eventLogCid = Some eventLogCid
+    policySwitchoverTimes = policySwitchoverTimes
 
-summarizeAndValidateExternalPartyContext : ExternalPartyTransferContext -> Party -> Transfer -> Update (TransferContextSummaryV2, Optional (TextMap.TextMap Time))
+summarizeAndValidateExternalPartyContext : ExternalPartyTransferContext -> Party -> Transfer -> Update TransferContextSummaryV2
 summarizeAndValidateExternalPartyContext context dso tf = do
   -- check the referenced ExternalPartyConfigState
   externalPartyConfigState <- fetchReferenceData (ForDso with dso) context.externalPartyConfigState
@@ -1328,8 +1330,8 @@ summarizeAndValidateExternalPartyContext context dso tf = do
         pure tf.provider
       else pure None
 
-  return 
-    (TransferContextSummaryV2 with
+  return $
+    TransferContextSummaryV2 with
       dso = dso
       config = transferConfigAmuletFromExternalPartyConfigState externalPartyConfigState
       featuredAppProvider
@@ -1340,8 +1342,7 @@ summarizeAndValidateExternalPartyContext context dso tf = do
       amuletPrice = externalPartyConfigState.amuletPrice
       rewardCalculationVersion = externalPartyConfigState.rewardCalculationVersion
       eventLogCid = Some (toInterfaceContractId context.externalPartyConfigState)
-    , externalPartyConfigState.policySwitchoverTimes
-    )
+      policySwitchoverTimes = externalPartyConfigState.policySwitchoverTimes
 
 getValidatorRight : TransferContextSummaryV2 -> Party -> Update (ContractId ValidatorRight)
 getValidatorRight csum user =
