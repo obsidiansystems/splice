@@ -29,13 +29,21 @@ import Prelude hiding (mapA, concat)
 
 class GovernanceAllocation a where
   getGovernanceLock : a -> Optional GovernanceLock
-  createUnfundedGovernanceAllocation : Party -> GovernanceLock -> V2.AllocationFactory_Allocate -> Update (ContractId a, V2.AllocationInstructionResult)
+  createUnfundedGovernanceAllocation : GovernanceLock -> V2.AllocationFactory_Allocate -> Update (ContractId a, V2.AllocationInstructionResult)
   -- ^ uses ContractId a to avoid an ambiguous type. There's probably a better way to hook into settlement-like funds movement than to use this and settleBatch.
 
 data GovernanceLock
   = GovernanceLock_SVLocked AggregatedLock
   | GovernanceLock_VestingLocked VestingLock
   deriving (Eq, Show)
+
+data GovernanceLockOperation
+  = GovernanceLockOperation_Allocate GovernanceLock
+  | GovernanceLockOperation_TopUp TopUpAllocation
+
+data TopUpAllocation =
+  TopUpAllocation with
+    allocationCid : ContractId V2.Allocation
 
 data AggregatedLock =
   AggregatedLock with
@@ -83,6 +91,8 @@ initialAmountKey : Text
 initialAmountKey = "cip-105/initialAmount"
 effectiveAtKey : Text
 effectiveAtKey = "cip-105/effectiveAt"
+topUpAllocationMetadataKey : Text
+topUpAllocationMetadataKey = "cip-105/topup-allocation-cid"
 
 
 unlockControllerKey : Text
@@ -94,9 +104,11 @@ substituteControllerKey = "cip-105/substituteControllers"
 
 
 governanceMetadataKeys : Metadata -> S.Set Text
-governanceMetadataKeys meta = S.fromList $ fst <$> TM.toList ( TM.filterWithKey ( \_ a -> "cip-105/" `T.isPrefixOf` a ) meta.values )
+governanceMetadataKeys meta = S.fromList $ fst <$> TM.toList ( TM.filterWithKey ( \a _ -> "cip-105/" `T.isPrefixOf` a ) meta.values )
 
-isGovernanceAllocationArgument V2.AllocationFactory_Allocate{extraArgs = ExtraArgs { meta }} = not ( S.null $ governanceMetadataKeys meta )
+isGovernanceAllocationArgument : V2.AllocationFactory_Allocate -> Bool
+isGovernanceAllocationArgument arg = not ( S.null $ governanceMetadataKeys arg.allocation.meta ) 
+  || not (TM.null ( TM.filterWithKey ( \a _ -> "cip-105/" `T.isPrefixOf` a ) arg.extraArgs.context.values))
 
 checkGovernanceMetadataKeys : (CanAssert m) => S.Set Text -> Metadata -> m ()
 checkGovernanceMetadataKeys knownKeys =
@@ -148,11 +160,11 @@ instance CanAssert m => ParseLockDataFromMeta m VestingLock where
 
 -- | Parsing entry point
 
-parseAndValidateGovernanceLock : CanAssert m => Bool -> Party -> V2.AllocationFactory_Allocate -> m (Optional GovernanceLock)
-parseAndValidateGovernanceLock fromAllocate dso alloc = do
-  lock <- parseFromMetadata alloc.allocation.meta
-  case lock of
-    Some _ -> do
+parseAndValidateGovernanceLockOperation : CanAssert m => Bool -> Party -> V2.AllocationFactory_Allocate -> m (Optional GovernanceLockOperation)
+parseAndValidateGovernanceLockOperation fromAllocate dso alloc = do
+  optLock : Optional GovernanceLock <- parseFromMetadata alloc.allocation.meta
+  case optLock of
+    Some lock -> do
       require "must have the DSO as admin" $ alloc.allocation.admin == dso
       require "must have the DSO as executors" $ alloc.settlement.executors == [dso]
       require "must be a committed allocation" alloc.allocation.committed
@@ -160,8 +172,14 @@ parseAndValidateGovernanceLock fromAllocate dso alloc = do
       require "must not expire" $ alloc.allocation.settlementDeadline == Some maxComparableTime
       -- Lock expiry also simply forced to max in computeAllocationExpiry when governance locked.
       -- Note: instrument id of only amulet and non-zero allocation are already checked by AmuletAllocationV2 ensure clause.
-      pure lock
-    None -> pure None
+      pure . Some $ GovernanceLockOperation_Allocate lock
+    None -> do
+      let eitherCid = lookupFromContext @(ContractId V2.Allocation) alloc.extraArgs.context topUpAllocationMetadataKey
+      case eitherCid of
+        Left t -> assertFail t
+        Right None -> pure None
+        Right (Some topUpAllocationCid) ->
+          pure . Some . GovernanceLockOperation_TopUp $ TopUpAllocation topUpAllocationCid
 
 governanceLockProposal_rules (GovernanceLock_VestingLocked _)
   = assertFail "Creating vesting locks from an allocation instruction is not permitted"
@@ -259,6 +277,7 @@ aggregateLockUnlock lock a aCid arg = do
     checkControllerSpecification TM.empty arg.actors $ fromOptional (defaultControllerSpecification ownerParty) lock.controllers.unlock
 
     now <- getFromContextU arg.extraArgs.context effectiveAtKey -- FIXME: read from metadata not context.
+    isLedgerTimeLE now >>= require "effectiveAt must not be in the past"      
 
     let endDate = getEndTime now
         transferLegId = "unlock"
@@ -276,13 +295,13 @@ aggregateLockUnlock lock a aCid arg = do
           controllers = lock.controllers
 
     -- Not easy to call directly into amulet_allocationFactoryV2_allocateImpl or the like here as that would make a circular dependency.
-    (withdrawTo : ContractId a, _) <- createUnfundedGovernanceAllocation alloc.allocation.admin vestingGovernanceLock $ V2.AllocationFactory_Allocate with
+    (withdrawTo : ContractId a, _) <- createUnfundedGovernanceAllocation vestingGovernanceLock $ V2.AllocationFactory_Allocate with
       settlement = alloc.settlement
       allocation = AllocationSpecification with
         admin = alloc.allocation.admin
         authorizer = alloc.allocation.authorizer
         transferLegSides = []
-        settlementDeadline = Some endDate -- Might as well let it unlock normally at the end of vesting.
+        settlementDeadline = Some maxComparableTime
         nextIterationFunding = Some TM.empty -- Iterated settlement enabled, with no funding
         committed = True
         meta = emptyMetadata -- governance settings passed in the dedicated argument to createGovernanceAllocation
@@ -358,6 +377,7 @@ vestingLockWithdraw lock a aCid arg = do
         vestingLockCid = toInterfaceContractId @V2.Allocation aCid
 
     now <- getFromContextU arg.extraArgs.context effectiveAtKey -- FIXME: read from metadata, not context.
+    isLedgerTimeGE now >>= require "effectiveAt must not be in the future"
 
     -- Removed withdraw controllers for the moment on vesting locks, it seems significantly more questionable to restrict withdrawal of conceptually unlocked amulet.
 
