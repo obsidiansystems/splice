@@ -29,7 +29,7 @@ import Prelude hiding (mapA, concat)
 
 class GovernanceAllocation a where
   getGovernanceLock : a -> Optional GovernanceLock
-  createUnfundedGovernanceAllocation : Party -> GovernanceLock -> V2.AllocationFactory_Allocate -> Update (ContractId a, V2.AllocationInstructionResult)
+  createUnfundedGovernanceAllocation : GovernanceLock -> V2.AllocationFactory_Allocate -> Update (ContractId a, V2.AllocationInstructionResult)
   -- ^ uses ContractId a to avoid an ambiguous type. There's probably a better way to hook into settlement-like funds movement than to use this and settleBatch.
 
 data GovernanceLock
@@ -104,9 +104,11 @@ substituteControllerKey = "cip-105/substituteControllers"
 
 
 governanceMetadataKeys : Metadata -> S.Set Text
-governanceMetadataKeys meta = S.fromList $ fst <$> TM.toList ( TM.filterWithKey ( \_ a -> "cip-105/" `T.isPrefixOf` a ) meta.values )
+governanceMetadataKeys meta = S.fromList $ fst <$> TM.toList ( TM.filterWithKey ( \a _ -> "cip-105/" `T.isPrefixOf` a ) meta.values )
 
-isGovernanceAllocationArgument V2.AllocationFactory_Allocate{extraArgs = ExtraArgs { meta }} = not ( S.null $ governanceMetadataKeys meta )
+isGovernanceAllocationArgument : V2.AllocationFactory_Allocate -> Bool
+isGovernanceAllocationArgument arg = not ( S.null $ governanceMetadataKeys arg.allocation.meta ) 
+  || not (TM.null ( TM.filterWithKey ( \a _ -> "cip-105/" `T.isPrefixOf` a ) arg.extraArgs.context.values))
 
 checkGovernanceMetadataKeys : (CanAssert m) => S.Set Text -> Metadata -> m ()
 checkGovernanceMetadataKeys knownKeys =
@@ -275,6 +277,7 @@ aggregateLockUnlock lock a aCid arg = do
     checkControllerSpecification TM.empty arg.actors $ fromOptional (defaultControllerSpecification ownerParty) lock.controllers.unlock
 
     now <- getFromContextU arg.extraArgs.context effectiveAtKey -- FIXME: read from metadata not context.
+    isLedgerTimeLE now >>= require "effectiveAt must not be in the past"      
 
     let endDate = getEndTime now
         transferLegId = "unlock"
@@ -292,13 +295,13 @@ aggregateLockUnlock lock a aCid arg = do
           controllers = lock.controllers
 
     -- Not easy to call directly into amulet_allocationFactoryV2_allocateImpl or the like here as that would make a circular dependency.
-    (withdrawTo : ContractId a, _) <- createUnfundedGovernanceAllocation alloc.allocation.admin vestingGovernanceLock $ V2.AllocationFactory_Allocate with
+    (withdrawTo : ContractId a, _) <- createUnfundedGovernanceAllocation vestingGovernanceLock $ V2.AllocationFactory_Allocate with
       settlement = alloc.settlement
       allocation = AllocationSpecification with
         admin = alloc.allocation.admin
         authorizer = alloc.allocation.authorizer
         transferLegSides = []
-        settlementDeadline = Some endDate -- Might as well let it unlock normally at the end of vesting.
+        settlementDeadline = Some maxComparableTime
         nextIterationFunding = Some TM.empty -- Iterated settlement enabled, with no funding
         committed = True
         meta = emptyMetadata -- governance settings passed in the dedicated argument to createGovernanceAllocation
@@ -374,6 +377,7 @@ vestingLockWithdraw lock a aCid arg = do
         vestingLockCid = toInterfaceContractId @V2.Allocation aCid
 
     now <- getFromContextU arg.extraArgs.context effectiveAtKey -- FIXME: read from metadata, not context.
+    isLedgerTimeGE now >>= require "effectiveAt must not be in the future"
 
     -- Removed withdraw controllers for the moment on vesting locks, it seems significantly more questionable to restrict withdrawal of conceptually unlocked amulet.
 

@@ -22,6 +22,7 @@ import DA.Time
 import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.HoldingV2 qualified as V2
 import Splice.Api.Token.AllocationV2 qualified as V2
+import Splice.Api.Token.AllocationInstructionV2 as V2
 import Splice.TokenStandard.Utils hiding (require)
 
 import Splice.AggregateLock
@@ -259,8 +260,20 @@ instance HasCheckedFetch AmuletAllocationV2 ForDso where
 
 instance GovernanceAllocation AmuletAllocationV2 where
   getGovernanceLock AmuletAllocationV2 { governanceLock } = governanceLock
-  createUnfundedGovernanceAllocation _dso _lock _ = do
-    undefined
+  createUnfundedGovernanceAllocation governanceLock V2.AllocationFactory_Allocate{..} = do
+    amuletAllocCid <- create AmuletAllocationV2 with
+          lockedAmulet = None
+          settlement
+          allocation
+          expiresAt = maxComparableTime
+          numIterations = 0
+          createdAt = requestedAt
+          governanceLock = Some governanceLock
+    let allocInstrResult = AllocationInstructionResult with
+          output = AllocationInstructionResult_Completed with allocationCid = toInterfaceContractId amuletAllocCid
+          authorizerChangeCids = TextMap.empty
+          meta = emptyMetadata
+    pure (amuletAllocCid, allocInstrResult)
 
 -- Governance Lock Support
 -- =======================
