@@ -45,7 +45,7 @@ template GovernanceLockSubstitutionProposal with
         originalInstructionCid
         settlement = V2.SettlementInfo with
           executors = [ admin ]
-          id = "cip-105/Substitution"
+          id = "cip-105/substitution"
           cid = None
           meta = emptyMetadata
         allocation = V2.AllocationSpecification with
