@@ -729,6 +729,7 @@ governanceAllocateImpl arg@V2.AllocationFactory_Allocate{..} = do
         authorizerChangeCids = TextMap.empty
         output = V2.AllocationInstructionResult_Pending with allocationInstructionCid
         meta = emptyMetadata
+    GovernanceLockOperation_Substitute op -> undefined -- FIXME: governanceAllocateSubstitutionImpl arg op allocationAmount
     GovernanceLockOperation_TopUp (TopUpAllocation topUpAllocationCid) -> do
       -- Grab top-up-alloc
       -- fetchButarchiveLater  old
