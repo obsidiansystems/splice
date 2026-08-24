@@ -8,10 +8,12 @@ import DA.Optional
 import DA.Time
 
 import Splice.Amulet
+import Splice.ExternalPartyConfigState
 import Splice.Amulet.TwoStepTransfer (holdingToTransferInputs)
 import Splice.AmuletRules
 import Splice.Api.Token.HoldingV1 (Holding)
 import Splice.Api.Token.MetadataV1
+import Splice.TokenStandard.Utils hiding (require)
 import Splice.Expiry
 import qualified Splice.TokenStandard.Utils as TSU
 import Splice.Types
@@ -40,10 +42,12 @@ template GovernanceLockFactory
         amount : Decimal
         inputs : [ContractId Holding]
         specification : GovernanceLockSpecification
-        context : ExternalPartyTransferContext
+        extraArgs : ExtraArgs
         owner : Party
       controller owner
       do
+        (context, state) <- unfeaturedPaymentContextAndConfigFromChoiceContext dso extraArgs.context
+        requireMinimumLock state amount
         ([holding], changeHolding) <- lockAmulet (ForOwner with dso; owner) [amount] inputs context
         governanceLock <- create GovernanceLock with
           dso
@@ -56,6 +60,18 @@ template GovernanceLockFactory
 
   -- TODO: implement V2 AllocationFactory in terms of above.
   -- TODO: find and use binding point for "magic address" V1 token standard to above.
+
+requireMinimumLock : ExternalPartyConfigState -> Decimal -> Update ()
+requireMinimumLock context amount = do
+  require' ("locked amount", amount) isGreaterOrEqualR ("minimum governance lock amount", fromOptional 10000.0 context.minimumGovernanceLock)
+
+unfeaturedPaymentContextAndConfigFromChoiceContext : Party -> ChoiceContext -> Update (ExternalPartyTransferContext, ExternalPartyConfigState)
+unfeaturedPaymentContextAndConfigFromChoiceContext dso choiceContext = do
+  (configStateCid, configState) <- getExternalPartyConfigStateFromChoiceContext dso choiceContext
+  pure (ExternalPartyTransferContext with
+          externalPartyConfigState = configStateCid
+          featuredAppRight = None
+       , configState )
 
 data GovernanceLockFactory_LockResult
   = GovernanceLockFactory_LockResult with
@@ -76,10 +92,11 @@ template GovernanceLock
       with
         amount : Optional Decimal
         requestedAt : Time
-        context : ExternalPartyTransferContext
+        extraArgs : ExtraArgs
         actors : [Party]
       controller actors
       do
+        (context, state) <- unfeaturedPaymentContextAndConfigFromChoiceContext dso extraArgs.context
         require "Only the owner may unlock" $ actors == [owner] -- TODO: custom controllers
         assertWithinDeadline "requestedAt must be in the future for unlock" requestedAt
 
@@ -88,7 +105,9 @@ template GovernanceLock
             currentAmount <- fetchAmount (ForOwner with dso; owner) holding
             pure (holding, None, currentAmount)
           Some unlockAmount -> do -- Splitting.
-            (vesting, stillLockedHolding) <- splitLockedAmulet (ForOwner with dso; owner) holding unlockAmount context
+            (vesting, stillLockedHolding, stillLockedAmount) <- splitLockedAmulet (ForOwner with dso; owner) holding unlockAmount context
+            requireMinimumLock state stillLockedAmount
+            requireMinimumLock state unlockAmount
             governanceLock <- create
               this with
                 holding = stillLockedHolding
@@ -132,10 +151,11 @@ template VestingLock
       with
         amount : Optional Decimal
         requestedAt : Time
-        context : ExternalPartyTransferContext
+        extraArgs : ExtraArgs
         actors : [Party]
       controller actors
       do
+        context <- externalPartyTransferFromChoiceContext dso extraArgs.context
         require "Only the owner may withdraw" $ actors == [owner] -- TODO: custom controllers
         currentAmount <- fetchAmount (ForOwner with dso; owner) holding
         assertDeadlineExceeded "requestAt must be in the past for withdraw" requestedAt
@@ -193,18 +213,18 @@ vestingDurationFor (GLS_SuperValidatorRightsOwner _) _ = days 365 + hours 6
 
 -- Invariant: _none_ of these functions move amounts to new parties or modify total amounts of amulet, except potentially by minting from reward coupons.
 
-splitLockedAmulet : ForOwner -> ContractId LockedAmulet -> Decimal -> ExternalPartyTransferContext -> Update (ContractId LockedAmulet, ContractId LockedAmulet)
+splitLockedAmulet : ForOwner -> ContractId LockedAmulet -> Decimal -> ExternalPartyTransferContext -> Update (ContractId LockedAmulet, ContractId LockedAmulet, Decimal)
 splitLockedAmulet forOwner lockedAmuletCid amount context = do
-  ([splitLock], remainder) <- multiSplitLockedAmulet forOwner lockedAmuletCid [amount] context
-  pure (splitLock, remainder)
+  ([splitLock], remainder, remainderAmount) <- multiSplitLockedAmulet forOwner lockedAmuletCid [amount] context
+  pure (splitLock, remainder, remainderAmount)
 
-multiSplitLockedAmulet : ForOwner -> ContractId LockedAmulet -> [Decimal] -> ExternalPartyTransferContext -> Update ([ContractId LockedAmulet], ContractId LockedAmulet)
+multiSplitLockedAmulet : ForOwner -> ContractId LockedAmulet -> [Decimal] -> ExternalPartyTransferContext -> Update ([ContractId LockedAmulet], ContractId LockedAmulet, Decimal)
 multiSplitLockedAmulet forOwner lockedAmuletCid amounts context = do
   currentAmount <- fetchAmount forOwner lockedAmuletCid
   unlockResult <- exercise lockedAmuletCid LockedAmulet_UnlockV2
-  let finalAmount = currentAmount - sum amounts
-  (remainderLock::specifiedLocks, None) <- lockAmulet forOwner (finalAmount :: amounts) [toInterfaceContractId unlockResult.amuletCid] context
-  pure (specifiedLocks, remainderLock)
+  let remainderAmount = currentAmount - sum amounts
+  (remainderLock::specifiedLocks, None) <- lockAmulet forOwner (remainderAmount :: amounts) [toInterfaceContractId unlockResult.amuletCid] context
+  pure (specifiedLocks, remainderLock, remainderAmount)
 
 partialUnlock : ForOwner -> ContractId LockedAmulet -> Decimal -> ExternalPartyTransferContext -> Update (ContractId LockedAmulet, ContractId Amulet)
 partialUnlock forOwner lockedAmuletCid amount context = do
